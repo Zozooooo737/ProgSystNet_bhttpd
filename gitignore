@@ -1,0 +1,4 @@
+bhttpd
+*.o
+*.key
+*.log
