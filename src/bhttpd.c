@@ -1,14 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <regex.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
 #define DEFAULT_PORT 26130
 #define BUFFER_SIZE  4096
+
+#define REQUEST_REGEX "^(GET|HEAD|POST) (/[^ \r\n]*) HTTP/1\\.[01](\r?\n|$)"
 
 static void usage(FILE *out, const char *prog) {
     fprintf(out,
@@ -22,6 +26,29 @@ static void usage(FILE *out, const char *prog) {
         prog);
 }
 
+static void send_response(int fd, const char *status, const char *body, int send_body) {
+    char date[64];
+    time_t now = time(NULL);
+    struct tm tm_utc;
+    gmtime_r(&now, &tm_utc);
+    strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &tm_utc);
+
+    char response[2048];
+    int len = snprintf(response, sizeof(response),
+        "HTTP/1.0 %s\r\n"
+        "Date: %s\r\n"
+        "Server: bhttpd/0.1\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        status, date, strlen(body), send_body ? body : "");
+    if (len < 0 || (size_t)len >= sizeof(response)) {
+        return;
+    }
+    send(fd, response, (size_t)len, MSG_NOSIGNAL);
+}
+
 static void handle_request(int fd, int debug) {
     char buffer[BUFFER_SIZE];
     ssize_t n = recv(fd, buffer, BUFFER_SIZE - 1, 0);
@@ -33,17 +60,40 @@ static void handle_request(int fd, int debug) {
         fprintf(stderr, "[debug] requete recue :\n%s\n", buffer);
     }
 
-    const char *body = "<html><body>Hello World!<br><br>Enzo BOTTURA BIC 2</body></html>\n";
-    char response[1024];
-    int len = snprintf(response, sizeof(response),
-        "HTTP/1.0 200 OK\r\n"
-        "Server: bhttpd/0.1\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: %zu\r\n"
-        "\r\n"
-        "%s",
-        strlen(body), body);
-    send(fd, response, (size_t)len, 0);
+    regex_t re;
+    if (regcomp(&re, REQUEST_REGEX, REG_EXTENDED) != 0) {
+        fprintf(stderr, "regcomp failed\n");
+        return; 
+    }
+
+    regmatch_t m[3];
+    if (regexec(&re, buffer, 3, m, 0) == REG_NOMATCH) {
+        if (debug) {
+            fprintf(stderr, "[debug] requete invalide -> 400\n");
+        }
+        send_response(fd, "400 Bad Request",
+            "<title>400 Bad Request</title>\n"
+            "<h1>400 Bad Request</h1>\n"
+            "<p>Requete invalide.</p>\n"
+            "<hr>\n"
+            "<p>Enzo BOTTURA - BIC 2</p>\n", 1);
+    } else {
+        char method[8] = {0};
+        char path[256] = {0};
+        snprintf(method, sizeof(method), "%.*s" ,(int)(m[1].rm_eo - m[1].rm_so), buffer + m[1].rm_so);
+        snprintf(path, sizeof(path), "%.*s", (int)(m[2].rm_eo - m[2].rm_so), buffer + m[2].rm_so);
+        if (debug) {
+            fprintf(stderr, "[debug] methode=%s chemin=%s\n", method, path);
+        }
+        send_response(fd, "200 OK",
+            "<title>200 OK</title>\n"
+            "<h1>200 OK</h1>\n"
+            "<hr>\n"
+            "<p>Hello World!</p>\n"
+            "<p>Enzo BOTTURA - BIC 2</p>\n",
+            strcmp(method, "HEAD") != 0);
+    }
+    regfree(&re);
 }
 
 int main(int argc, char *argv[]) {
@@ -54,7 +104,7 @@ int main(int argc, char *argv[]) {
     const char *sockfile = NULL;
     int opt;
 
-    opterr = 0; /* on affiche nous-memes les erreurs d'options */
+    opterr = 0;
     while ((opt = getopt(argc, argv, "c:dhl:p:s:")) != -1) {
         switch (opt) {
         case 'c':
@@ -127,7 +177,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("Serveur demarre sur le port %d\n\n", port);
+    printf("Serveur demarre sur le port %d\n", port);
     fflush(stdout);
 
     while (1) {
